@@ -1,0 +1,305 @@
+<!DOCTYPE html>
+<html lang="he" dir="rtl">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>סידור עבודה - ייצור מבוזר טכני</title>
+    
+    <!-- ייבוא React ו-Babel -->
+    <script src="https://unpkg.com/react@18/umd/react.production.min.js" crossorigin></script>
+    <script src="https://unpkg.com/react-dom@18/umd/react-dom.production.min.js" crossorigin></script>
+    <script src="https://unpkg.com/@babel/standalone/babel.min.js"></script>
+    
+    <!-- ייבוא Firebase (גרסת תאימות לדפדפן) -->
+    <script src="https://www.gstatic.com/firebasejs/10.12.2/firebase-app-compat.js"></script>
+    <script src="https://www.gstatic.com/firebasejs/10.12.2/firebase-firestore-compat.js"></script>
+
+    <!-- ייבוא TailwindCSS -->
+    <script src="https://cdn.tailwindcss.com"></script>
+    
+    <style>
+        body { font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif; background-color: #f0f4f8; }
+        .glass-card { background: rgba(255, 255, 255, 0.95); box-shadow: 0 4px 15px rgba(0,0,0,0.05); border-radius: 1rem; }
+        .app-gradient { background: linear-gradient(135deg, #1e3a8a 0%, #3b82f6 100%); }
+    </style>
+</head>
+<body>
+    <div id="root"></div>
+
+    <script type="text/babel">
+        // --- הגדרות Firebase ---
+        const firebaseConfig = {
+            apiKey: "AIzaSyCDIQc5vKjMDVAao47PoapqdowILgJEbvE",
+            authDomain: "iec--weektable.firebaseapp.com",
+            projectId: "iec--weektable",
+            storageBucket: "iec--weektable.firebasestorage.app",
+            messagingSenderId: "298924086909",
+            appId: "1:298924086909:web:be1e52a5d1f2ca4cdbc314"
+        };
+        
+        // אתחול החיבור למסד הנתונים
+        firebase.initializeApp(firebaseConfig);
+        const db = firebase.firestore();
+        // ניצור מסמך אחד מרכזי שיישמור את כל הלו"ז
+        const docRef = db.collection('mivuzar').doc('main_schedule');
+
+        const { useState, useEffect } = React;
+
+        const EMPLOYEES = ['עמית', 'טוביה', 'מזאן', 'גיא', 'יואל'];
+        const DAYS = ['ראשון', 'שני', 'שלישי', 'רביעי', 'חמישי'];
+        
+        const LOCATIONS = {
+            'מה"ר': { limit: 2, icon: '🏢', color: 'blue' },
+            'בית': { limit: 2, icon: '🏠', color: 'green' },
+            'אתר מרוחק': { limit: 1, icon: '🚗', color: 'orange' }
+        };
+
+        const generateEmptySchedule = () => {
+            let sched = {};
+            EMPLOYEES.forEach(emp => {
+                sched[emp] = { 'ראשון': '', 'שני': '', 'שלישי': '', 'רביעי': '', 'חמישי': '' };
+            });
+            return sched;
+        };
+
+        function App() {
+            const [schedule, setSchedule] = useState(generateEmptySchedule());
+            const [lastUpdated, setLastUpdated] = useState({});
+            const [editingUser, setEditingUser] = useState(null);
+            const [isLoading, setIsLoading] = useState(true);
+
+            // האזנה לשינויים במסד הנתונים בענן (בזמן אמת)
+            useEffect(() => {
+                const unsubscribe = docRef.onSnapshot((doc) => {
+                    if (doc.exists) {
+                        const data = doc.data();
+                        setSchedule(data.schedule || generateEmptySchedule());
+                        setLastUpdated(data.lastUpdated || {});
+                    } else {
+                        // אם זה פעם ראשונה שפותחים את האפליקציה, נייצר מסמך ריק בענן
+                        docRef.set({
+                            schedule: generateEmptySchedule(),
+                            lastUpdated: {}
+                        });
+                    }
+                    setIsLoading(false);
+                }, (error) => {
+                    console.error("שגיאה בקריאת הנתונים:", error);
+                    alert("שגיאת התחברות לנתונים, ודא שהפעלת את מסד הנתונים על Test Mode.");
+                });
+
+                return () => unsubscribe();
+            }, []);
+
+            // פונקציה לעדכון הענן ברגע שמישהו לוחץ על כפתור
+            const updateCloud = (newSchedule, newLastUpdated) => {
+                docRef.set({
+                    schedule: newSchedule,
+                    lastUpdated: newLastUpdated
+                }).catch((error) => {
+                    console.error("שגיאה בשמירה:", error);
+                    alert("השמירה נכשלה. בדוק חיבור לאינטרנט.");
+                });
+            };
+
+            const getUsageCount = (empName, locationName) => {
+                let count = 0;
+                const empSched = schedule[empName];
+                for (let day in empSched) {
+                    if (empSched[day] === locationName) count++;
+                }
+                return count;
+            };
+
+            const handleLocationSelect = (empName, day, locationName) => {
+                const currentLoc = schedule[empName][day];
+                
+                const now = new Date();
+                const dayNames = ['ראשון', 'שני', 'שלישי', 'רביעי', 'חמישי', 'שישי', 'שבת'];
+                const timeStr = now.toLocaleTimeString('he-IL', { hour: '2-digit', minute: '2-digit' });
+                const dateStr = `${now.getDate()}/${now.getMonth() + 1}`;
+                const timeStamp = `יום ${dayNames[now.getDay()]} (${dateStr}) ב-${timeStr}`;
+
+                let newSchedule = { ...schedule };
+                let newLastUpdated = { ...lastUpdated };
+
+                // אם לחצו על המיקום שכבר נבחר - נבטל את הבחירה
+                if (currentLoc === locationName) {
+                    newSchedule[empName] = { ...newSchedule[empName], [day]: '' };
+                    newLastUpdated[empName] = timeStamp;
+                    updateCloud(newSchedule, newLastUpdated);
+                    return;
+                }
+
+                // בדיקת מכסה
+                if (locationName) {
+                    const currentUsage = getUsageCount(empName, locationName);
+                    if (currentUsage >= LOCATIONS[locationName].limit) {
+                        alert(`חרגת ממכסת הימים עבור ${locationName} (מקסימום ${LOCATIONS[locationName].limit} בשבוע).`);
+                        return;
+                    }
+                }
+
+                newSchedule[empName] = { ...newSchedule[empName], [day]: locationName };
+                newLastUpdated[empName] = timeStamp;
+                
+                // שליחה לענן
+                updateCloud(newSchedule, newLastUpdated);
+            };
+
+            const getLocationStyle = (locName, isSelected = false) => {
+                if (!locName) return 'bg-gray-100 text-gray-400 border-gray-200';
+                const baseColors = {
+                    'blue': isSelected ? 'bg-blue-500 text-white border-blue-600 shadow-md' : 'bg-blue-50 text-blue-700 border-blue-200 hover:bg-blue-100',
+                    'green': isSelected ? 'bg-green-500 text-white border-green-600 shadow-md' : 'bg-green-50 text-green-700 border-green-200 hover:bg-green-100',
+                    'orange': isSelected ? 'bg-orange-500 text-white border-orange-600 shadow-md' : 'bg-orange-50 text-orange-700 border-orange-200 hover:bg-orange-100'
+                };
+                return baseColors[LOCATIONS[locName].color];
+            };
+
+            if (isLoading) {
+                return (
+                    <div className="flex justify-center items-center h-screen bg-gray-50">
+                        <div className="text-xl font-bold text-blue-600 animate-pulse">מתחבר לענן... ☁️</div>
+                    </div>
+                );
+            }
+
+            return (
+                <div className="max-w-4xl mx-auto p-4 pb-20">
+                    <header className="app-gradient text-white p-6 rounded-2xl shadow-lg mb-8 text-center relative overflow-hidden">
+                        <h1 className="text-3xl font-black mb-2 relative z-10">מערכת ניהול נוכחות</h1>
+                        <p className="text-blue-100 text-lg font-medium relative z-10">תחום ייצור מבוזר טכני ⚡</p>
+                    </header>
+
+                    <div className="glass-card p-6 mb-8 border border-gray-100 shadow-md">
+                        <div className="flex justify-between items-center mb-6 border-b pb-4">
+                            <h2 className="text-2xl font-bold text-gray-800">עדכון סידור עבודה שבועי</h2>
+                            <span className="text-xs bg-green-100 text-green-700 px-2 py-1 rounded-full font-bold flex items-center gap-1">
+                                <span className="w-2 h-2 rounded-full bg-green-500 inline-block animate-pulse"></span>
+                                מחובר לענן
+                            </span>
+                        </div>
+
+                        <div>
+                            <label className="block text-gray-700 font-bold mb-3">בחר עובד לעדכון הלו"ז:</label>
+                            <div className="flex flex-wrap gap-2 mb-6">
+                                {EMPLOYEES.map(emp => (
+                                    <button
+                                        key={emp}
+                                        onClick={() => setEditingUser(emp === editingUser ? null : emp)}
+                                        className={`px-5 py-3 rounded-lg font-bold border-2 transition-all ${
+                                            editingUser === emp 
+                                                ? 'bg-blue-900 text-white border-blue-900 shadow-md transform scale-105' 
+                                                : 'bg-white text-gray-700 border-gray-200 hover:border-blue-400 hover:bg-blue-50'
+                                        }`}
+                                    >
+                                        {emp}
+                                    </button>
+                                ))}
+                            </div>
+
+                            {editingUser && (
+                                <div className="bg-gray-50/80 p-5 rounded-xl border border-gray-200 animate-fade-in shadow-inner">
+                                    <div className="flex justify-between items-center mb-5 border-b pb-3">
+                                        <h3 className="text-xl font-bold text-gray-800">הלו"ז של {editingUser}</h3>
+                                        <div className="flex flex-wrap gap-3 text-sm font-medium">
+                                            {Object.entries(LOCATIONS).map(([locName, data]) => {
+                                                const used = getUsageCount(editingUser, locName);
+                                                const isFull = used >= data.limit;
+                                                return (
+                                                    <span key={locName} className={`px-2 py-1 rounded border ${isFull ? 'bg-red-50 text-red-700 border-red-200' : 'bg-white text-gray-700 border-gray-200'}`}>
+                                                        {data.icon} {locName}: {used}/{data.limit}
+                                                    </span>
+                                                );
+                                            })}
+                                        </div>
+                                    </div>
+
+                                    <div className="space-y-4">
+                                        {DAYS.map(day => (
+                                            <div key={day} className="flex flex-col sm:flex-row sm:items-center gap-3 bg-white p-3 rounded-lg border border-gray-100 shadow-sm hover:shadow-md transition-shadow">
+                                                <div className="w-20 font-bold text-gray-700">יום {day}:</div>
+                                                <div className="flex flex-wrap gap-2 flex-1">
+                                                    {Object.keys(LOCATIONS).map(loc => {
+                                                        const isSelected = schedule[editingUser][day] === loc;
+                                                        return (
+                                                            <button
+                                                                key={loc}
+                                                                onClick={() => handleLocationSelect(editingUser, day, loc)}
+                                                                className={`flex-1 min-w-[80px] px-3 py-2 rounded-lg font-bold text-sm border-2 transition-all ${getLocationStyle(loc, isSelected)}`}
+                                                            >
+                                                                {LOCATIONS[loc].icon} {loc}
+                                                            </button>
+                                                        )
+                                                    })}
+                                                </div>
+                                            </div>
+                                        ))}
+                                    </div>
+                                    
+                                    <button 
+                                        onClick={() => setEditingUser(null)}
+                                        className="mt-6 w-full bg-blue-600 text-white font-bold text-lg py-3 rounded-lg hover:bg-blue-700 shadow-md transition-colors"
+                                    >
+                                        סגור חלונית עריכה ✔️
+                                    </button>
+                                </div>
+                            )}
+                        </div>
+                    </div>
+
+                    <div className="glass-card p-6 border border-gray-100 shadow-md">
+                        <h2 className="text-2xl font-bold text-gray-800 mb-6 text-center border-b pb-4">תמונת מצב מחלקתית שבועית</h2>
+                        
+                        <div className="overflow-x-auto rounded-xl border border-gray-200 shadow-sm">
+                            <table className="w-full text-center min-w-[700px]">
+                                <thead className="bg-gray-100 text-gray-700 text-sm font-black border-b border-gray-200">
+                                    <tr>
+                                        <th className="p-4 bg-gray-200/80 sticky right-0 z-10 w-32 border-l border-gray-300">שם עובד</th>
+                                        {DAYS.map(day => <th key={day} className="p-4">{day}</th>)}
+                                    </tr>
+                                </thead>
+                                <tbody>
+                                    {EMPLOYEES.map((emp, index) => (
+                                        <tr key={emp} className={`border-b border-gray-100 transition-colors hover:bg-blue-50/50 ${index % 2 === 0 ? 'bg-white' : 'bg-gray-50/30'}`}>
+                                            <td className="p-3 font-bold text-gray-800 sticky right-0 bg-inherit border-l border-gray-200 shadow-[2px_0_4px_rgba(0,0,0,0.02)] w-32">
+                                                <div className="text-lg">{emp}</div>
+                                                {lastUpdated[emp] && (
+                                                    <div className="text-[11px] text-gray-500 font-normal mt-1 leading-tight bg-gray-100/50 inline-block px-1 rounded">
+                                                        עודכן: {lastUpdated[emp]}
+                                                    </div>
+                                                )}
+                                            </td>
+                                            {DAYS.map(day => {
+                                                const loc = schedule[emp][day];
+                                                return (
+                                                    <td key={day} className="p-2 w-24">
+                                                        {loc ? (
+                                                            <div className={`px-2 py-2 rounded-lg font-bold text-xs border ${getLocationStyle(loc, false)} shadow-sm`}>
+                                                                <span className="block mb-1 text-lg">{LOCATIONS[loc].icon}</span>
+                                                                {loc}
+                                                            </div>
+                                                        ) : (
+                                                            <div className="text-gray-400 text-sm font-medium px-2 py-3 bg-gray-50 rounded-lg border border-dashed border-gray-200">
+                                                                -
+                                                            </div>
+                                                        )}
+                                                    </td>
+                                                )
+                                            })}
+                                        </tr>
+                                    ))}
+                                </tbody>
+                            </table>
+                        </div>
+                    </div>
+                </div>
+            );
+        }
+
+        const root = ReactDOM.createRoot(document.getElementById('root'));
+        root.render(<App />);
+    </script>
+</body>
+</html>
