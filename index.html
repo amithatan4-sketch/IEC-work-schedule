@@ -5,29 +5,34 @@
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
     <title>סידור עבודה - ייצור מבוזר טכני</title>
     
-    <!-- ייבוא React ו-Babel -->
+    <!-- React & Babel -->
     <script src="https://unpkg.com/react@18/umd/react.production.min.js" crossorigin></script>
     <script src="https://unpkg.com/react-dom@18/umd/react-dom.production.min.js" crossorigin></script>
     <script src="https://unpkg.com/@babel/standalone/babel.min.js"></script>
     
-    <!-- ייבוא Firebase (גרסת תאימות לדפדפן) -->
+    <!-- Firebase -->
     <script src="https://www.gstatic.com/firebasejs/10.12.2/firebase-app-compat.js"></script>
     <script src="https://www.gstatic.com/firebasejs/10.12.2/firebase-firestore-compat.js"></script>
 
-    <!-- ייבוא TailwindCSS -->
+    <!-- TailwindCSS -->
     <script src="https://cdn.tailwindcss.com"></script>
     
     <style>
         body { font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif; background-color: #f0f4f8; }
         .glass-card { background: rgba(255, 255, 255, 0.95); box-shadow: 0 4px 15px rgba(0,0,0,0.05); border-radius: 1rem; }
         .app-gradient { background: linear-gradient(135deg, #1e3a8a 0%, #3b82f6 100%); }
+        .no-select { user-select: none; -webkit-user-select: none; -webkit-touch-callout: none; }
+        
+        /* Modal Animation */
+        @keyframes popIn { 0% { opacity: 0; transform: scale(0.9); } 100% { opacity: 1; transform: scale(1); } }
+        .modal-pop { animation: popIn 0.2s ease-out forwards; }
     </style>
 </head>
 <body>
     <div id="root"></div>
 
     <script type="text/babel">
-        // --- הגדרות Firebase ---
+        // --- הגדרות Firebase שלך ---
         const firebaseConfig = {
             apiKey: "AIzaSyCDIQc5vKjMDVAao47PoapqdowILgJEbvE",
             authDomain: "iec--weektable.firebaseapp.com",
@@ -37,13 +42,11 @@
             appId: "1:298924086909:web:be1e52a5d1f2ca4cdbc314"
         };
         
-        // אתחול החיבור למסד הנתונים
         firebase.initializeApp(firebaseConfig);
         const db = firebase.firestore();
-        // ניצור מסמך אחד מרכזי שיישמור את כל הלו"ז
         const docRef = db.collection('mivuzar').doc('main_schedule');
 
-        const { useState, useEffect } = React;
+        const { useState, useEffect, useRef } = React;
 
         const EMPLOYEES = ['עמית', 'טוביה', 'מזאן', 'גיא', 'יואל'];
         const DAYS = ['ראשון', 'שני', 'שלישי', 'רביעי', 'חמישי'];
@@ -54,6 +57,12 @@
             'אתר מרוחק': { limit: 1, icon: '🚗', color: 'orange' }
         };
 
+        const EXCEPTIONS = {
+            'מחלה': { icon: '🤒', color: 'red' },
+            'חופשה': { icon: '🌴', color: 'teal' },
+            'השתלמות': { icon: '📚', color: 'purple' }
+        };
+
         const generateEmptySchedule = () => {
             let sched = {};
             EMPLOYEES.forEach(emp => {
@@ -62,47 +71,103 @@
             return sched;
         };
 
+        // חישוב מתי היה יום חמישי האחרון בשעה 12:00
+        const getLastThursdayNoon = () => {
+            const now = new Date();
+            const d = new Date(now);
+            const day = d.getDay(); // 0 = Sun, 4 = Thu
+            let daysToSubtract = day - 4;
+            if (daysToSubtract < 0) daysToSubtract += 7; 
+            
+            // אם היום חמישי אבל השעה לפני 12, אנחנו מתייחסים ליום חמישי של שבוע שעבר
+            if (daysToSubtract === 0 && now.getHours() < 12) {
+                daysToSubtract = 7;
+            }
+            d.setDate(d.getDate() - daysToSubtract);
+            d.setHours(12, 0, 0, 0);
+            return d.getTime();
+        };
+
         function App() {
             const [schedule, setSchedule] = useState(generateEmptySchedule());
+            const [defaultSchedule, setDefaultSchedule] = useState(generateEmptySchedule());
             const [lastUpdated, setLastUpdated] = useState({});
             const [editingUser, setEditingUser] = useState(null);
             const [isLoading, setIsLoading] = useState(true);
+            const [exceptionModal, setExceptionModal] = useState(null); // { empName, day }
+            
+            // Refs לזיהוי לחיצה ארוכה
+            const pressTimer = useRef(null);
+            const isLongPress = useRef(false);
 
-            // האזנה לשינויים במסד הנתונים בענן (בזמן אמת)
             useEffect(() => {
                 const unsubscribe = docRef.onSnapshot((doc) => {
                     if (doc.exists) {
                         const data = doc.data();
-                        setSchedule(data.schedule || generateEmptySchedule());
-                        setLastUpdated(data.lastUpdated || {});
+                        const lastThuNoon = getLastThursdayNoon();
+                        const dbLastReset = data.lastReset || 0;
+
+                        // בדיקה אם הגיע הזמן לאיפוס השבועי
+                        if (lastThuNoon > dbLastReset) {
+                            performWeeklyReset(data.defaultSchedule || generateEmptySchedule());
+                        } else {
+                            setSchedule(data.schedule || generateEmptySchedule());
+                            setDefaultSchedule(data.defaultSchedule || generateEmptySchedule());
+                            setLastUpdated(data.lastUpdated || {});
+                            setIsLoading(false);
+                        }
                     } else {
-                        // אם זה פעם ראשונה שפותחים את האפליקציה, נייצר מסמך ריק בענן
+                        // אתחול ראשוני למערכת ריקה
+                        const empty = generateEmptySchedule();
                         docRef.set({
-                            schedule: generateEmptySchedule(),
-                            lastUpdated: {}
+                            schedule: empty,
+                            defaultSchedule: empty,
+                            lastUpdated: {},
+                            lastReset: Date.now()
                         });
                     }
-                    setIsLoading(false);
                 }, (error) => {
-                    console.error("שגיאה בקריאת הנתונים:", error);
-                    alert("שגיאת התחברות לנתונים, ודא שהפעלת את מסד הנתונים על Test Mode.");
+                    console.error("שגיאת התחברות:", error);
                 });
 
                 return () => unsubscribe();
             }, []);
 
-            // פונקציה לעדכון הענן ברגע שמישהו לוחץ על כפתור
-            const updateCloud = (newSchedule, newLastUpdated) => {
-                docRef.set({
+            const performWeeklyReset = (defaults) => {
+                const newLastUpdated = {};
+                const now = new Date();
+                const timeStr = now.toLocaleTimeString('he-IL', { hour: '2-digit', minute: '2-digit' });
+                const dateStr = `${now.getDate()}/${now.getMonth() + 1}`;
+                const stamp = `🔄 איפוס שבועי אוטומטי (${dateStr} ב-${timeStr})`;
+                
+                EMPLOYEES.forEach(emp => {
+                    newLastUpdated[emp] = stamp;
+                });
+
+                docRef.update({
+                    schedule: defaults,
+                    lastUpdated: newLastUpdated,
+                    lastReset: Date.now() // מעדכן כדי שלא יתאפס שוב עד חמישי הבא
+                });
+            };
+
+            const updateCloud = (newSchedule, newLastUpdated, newDefaults = null) => {
+                let updates = {
                     schedule: newSchedule,
                     lastUpdated: newLastUpdated
-                }).catch((error) => {
+                };
+                if (newDefaults) {
+                    updates.defaultSchedule = newDefaults;
+                }
+                
+                docRef.update(updates).catch((error) => {
                     console.error("שגיאה בשמירה:", error);
                     alert("השמירה נכשלה. בדוק חיבור לאינטרנט.");
                 });
             };
 
             const getUsageCount = (empName, locationName) => {
+                if (!LOCATIONS[locationName]) return 0; // לא סופר חריגים למכסה
                 let count = 0;
                 const empSched = schedule[empName];
                 for (let day in empSched) {
@@ -111,44 +176,82 @@
                 return count;
             };
 
-            const handleLocationSelect = (empName, day, locationName) => {
-                const currentLoc = schedule[empName][day];
-                
+            const generateTimeStamp = () => {
                 const now = new Date();
                 const dayNames = ['ראשון', 'שני', 'שלישי', 'רביעי', 'חמישי', 'שישי', 'שבת'];
                 const timeStr = now.toLocaleTimeString('he-IL', { hour: '2-digit', minute: '2-digit' });
                 const dateStr = `${now.getDate()}/${now.getMonth() + 1}`;
-                const timeStamp = `יום ${dayNames[now.getDay()]} (${dateStr}) ב-${timeStr}`;
+                return `עודכן: יום ${dayNames[now.getDay()]} (${dateStr}) ב-${timeStr}`;
+            };
 
+            const handleLocationSelect = (empName, day, locationName, isException = false) => {
+                const currentLoc = schedule[empName][day];
                 let newSchedule = { ...schedule };
                 let newLastUpdated = { ...lastUpdated };
 
-                // אם לחצו על המיקום שכבר נבחר - נבטל את הבחירה
                 if (currentLoc === locationName) {
                     newSchedule[empName] = { ...newSchedule[empName], [day]: '' };
-                    newLastUpdated[empName] = timeStamp;
-                    updateCloud(newSchedule, newLastUpdated);
-                    return;
-                }
-
-                // בדיקת מכסה
-                if (locationName) {
-                    const currentUsage = getUsageCount(empName, locationName);
-                    if (currentUsage >= LOCATIONS[locationName].limit) {
-                        alert(`חרגת ממכסת הימים עבור ${locationName} (מקסימום ${LOCATIONS[locationName].limit} בשבוע).`);
-                        return;
+                } else {
+                    if (!isException && locationName) {
+                        const currentUsage = getUsageCount(empName, locationName);
+                        if (currentUsage >= LOCATIONS[locationName].limit) {
+                            alert(`חרגת ממכסת הימים עבור ${locationName} (מקסימום ${LOCATIONS[locationName].limit} בשבוע).`);
+                            return;
+                        }
                     }
+                    newSchedule[empName] = { ...newSchedule[empName], [day]: locationName };
                 }
 
-                newSchedule[empName] = { ...newSchedule[empName], [day]: locationName };
-                newLastUpdated[empName] = timeStamp;
-                
-                // שליחה לענן
+                newLastUpdated[empName] = generateTimeStamp();
+                setExceptionModal(null); // סגירת תפריט אם פתוח
                 updateCloud(newSchedule, newLastUpdated);
+            };
+
+            const saveAsDefault = (empName) => {
+                if(window.confirm(`האם לנעול את הלו"ז הנוכחי כתבנית ברירת המחדל הקבועה של ${empName}?`)) {
+                    let newDefaults = { ...defaultSchedule };
+                    newDefaults[empName] = { ...schedule[empName] };
+                    updateCloud(schedule, lastUpdated, newDefaults);
+                    alert("נשמר בהצלחה! השבוע הזה ייטען אוטומטית בכל איפוס שבועי.");
+                }
+            };
+
+            // לחיצה ארוכה - פונקציות זיהוי
+            const handlePointerDown = (empName, day) => {
+                isLongPress.current = false;
+                pressTimer.current = setTimeout(() => {
+                    isLongPress.current = true;
+                    setExceptionModal({ empName, day });
+                    // רטט קל בנייד כדי לסמן שהלחיצה הארוכה עבדה
+                    if (window.navigator && window.navigator.vibrate) navigator.vibrate(50);
+                }, 500); // 500 מילי-שניות נחשב כלחיצה ארוכה
+            };
+
+            const handlePointerUp = (empName, day, locName) => {
+                if (pressTimer.current) clearTimeout(pressTimer.current);
+                if (!isLongPress.current) {
+                    handleLocationSelect(empName, day, locName, false);
+                }
+            };
+
+            const handlePointerLeave = () => {
+                if (pressTimer.current) clearTimeout(pressTimer.current);
             };
 
             const getLocationStyle = (locName, isSelected = false) => {
                 if (!locName) return 'bg-gray-100 text-gray-400 border-gray-200';
+                
+                // צבעים מיוחדים לחריגים
+                if (EXCEPTIONS[locName]) {
+                    const excColors = {
+                        'red': isSelected ? 'bg-red-500 text-white border-red-600 shadow-md' : 'bg-red-50 text-red-700 border-red-200 hover:bg-red-100',
+                        'teal': isSelected ? 'bg-teal-500 text-white border-teal-600 shadow-md' : 'bg-teal-50 text-teal-700 border-teal-200 hover:bg-teal-100',
+                        'purple': isSelected ? 'bg-purple-500 text-white border-purple-600 shadow-md' : 'bg-purple-50 text-purple-700 border-purple-200 hover:bg-purple-100'
+                    };
+                    return excColors[EXCEPTIONS[locName].color];
+                }
+
+                // צבעים רגילים
                 const baseColors = {
                     'blue': isSelected ? 'bg-blue-500 text-white border-blue-600 shadow-md' : 'bg-blue-50 text-blue-700 border-blue-200 hover:bg-blue-100',
                     'green': isSelected ? 'bg-green-500 text-white border-green-600 shadow-md' : 'bg-green-50 text-green-700 border-green-200 hover:bg-green-100',
@@ -157,32 +260,68 @@
                 return baseColors[LOCATIONS[locName].color];
             };
 
+            const getIconInfo = (locName) => {
+                if (LOCATIONS[locName]) return LOCATIONS[locName].icon;
+                if (EXCEPTIONS[locName]) return EXCEPTIONS[locName].icon;
+                return '';
+            };
+
             if (isLoading) {
                 return (
                     <div className="flex justify-center items-center h-screen bg-gray-50">
-                        <div className="text-xl font-bold text-blue-600 animate-pulse">מתחבר לענן... ☁️</div>
+                        <div className="text-xl font-bold text-blue-600 animate-pulse">מתחבר לענן וטוען נתונים... ☁️</div>
                     </div>
                 );
             }
 
             return (
-                <div className="max-w-4xl mx-auto p-4 pb-20">
+                <div className="max-w-4xl mx-auto p-4 pb-20 no-select">
+                    
+                    {/* חלונית צפה (Modal) לבחירת חריגים */}
+                    {exceptionModal && (
+                        <div className="fixed inset-0 bg-black/40 z-50 flex items-center justify-center backdrop-blur-sm" onClick={() => setExceptionModal(null)}>
+                            <div className="bg-white p-6 rounded-2xl shadow-2xl modal-pop max-w-sm w-full mx-4" onClick={e => e.stopPropagation()}>
+                                <h3 className="text-xl font-black text-gray-800 mb-4 border-b pb-2 text-center">
+                                    דווח חריג ליום {exceptionModal.day}
+                                </h3>
+                                <div className="flex flex-col gap-3">
+                                    {Object.entries(EXCEPTIONS).map(([excName, data]) => (
+                                        <button
+                                            key={excName}
+                                            onClick={() => handleLocationSelect(exceptionModal.empName, exceptionModal.day, excName, true)}
+                                            className={`p-4 rounded-xl font-bold text-lg border-2 flex items-center justify-center gap-3 transition-colors ${getLocationStyle(excName, false)}`}
+                                        >
+                                            <span className="text-2xl">{data.icon}</span> {excName}
+                                        </button>
+                                    ))}
+                                    <button 
+                                        onClick={() => handleLocationSelect(exceptionModal.empName, exceptionModal.day, '', false)}
+                                        className="p-4 rounded-xl font-bold text-gray-600 bg-gray-100 hover:bg-gray-200 border-2 border-gray-200 mt-2"
+                                    >
+                                        🗑️ נקה בחירה
+                                    </button>
+                                </div>
+                            </div>
+                        </div>
+                    )}
+
                     <header className="app-gradient text-white p-6 rounded-2xl shadow-lg mb-8 text-center relative overflow-hidden">
                         <h1 className="text-3xl font-black mb-2 relative z-10">מערכת ניהול נוכחות</h1>
                         <p className="text-blue-100 text-lg font-medium relative z-10">תחום ייצור מבוזר טכני ⚡</p>
                     </header>
 
+                    {/* אזור העריכה */}
                     <div className="glass-card p-6 mb-8 border border-gray-100 shadow-md">
                         <div className="flex justify-between items-center mb-6 border-b pb-4">
-                            <h2 className="text-2xl font-bold text-gray-800">עדכון סידור עבודה שבועי</h2>
+                            <h2 className="text-2xl font-bold text-gray-800">הגדרת לו"ז עובדים</h2>
                             <span className="text-xs bg-green-100 text-green-700 px-2 py-1 rounded-full font-bold flex items-center gap-1">
                                 <span className="w-2 h-2 rounded-full bg-green-500 inline-block animate-pulse"></span>
-                                מחובר לענן
+                                מסונכרן
                             </span>
                         </div>
 
                         <div>
-                            <label className="block text-gray-700 font-bold mb-3">בחר עובד לעדכון הלו"ז:</label>
+                            <label className="block text-gray-700 font-bold mb-3">בחר עובד לעדכון/נעילה:</label>
                             <div className="flex flex-wrap gap-2 mb-6">
                                 {EMPLOYEES.map(emp => (
                                     <button
@@ -200,39 +339,69 @@
                             </div>
 
                             {editingUser && (
-                                <div className="bg-gray-50/80 p-5 rounded-xl border border-gray-200 animate-fade-in shadow-inner">
+                                <div className="bg-gray-50/80 p-5 rounded-xl border border-gray-200 animate-fade-in shadow-inner relative">
                                     <div className="flex justify-between items-center mb-5 border-b pb-3">
-                                        <h3 className="text-xl font-bold text-gray-800">הלו"ז של {editingUser}</h3>
-                                        <div className="flex flex-wrap gap-3 text-sm font-medium">
-                                            {Object.entries(LOCATIONS).map(([locName, data]) => {
-                                                const used = getUsageCount(editingUser, locName);
-                                                const isFull = used >= data.limit;
-                                                return (
-                                                    <span key={locName} className={`px-2 py-1 rounded border ${isFull ? 'bg-red-50 text-red-700 border-red-200' : 'bg-white text-gray-700 border-gray-200'}`}>
-                                                        {data.icon} {locName}: {used}/{data.limit}
-                                                    </span>
-                                                );
-                                            })}
-                                        </div>
+                                        <h3 className="text-xl font-bold text-gray-800">השבוע של {editingUser}</h3>
+                                        <button 
+                                            onClick={() => saveAsDefault(editingUser)}
+                                            className="bg-gray-800 text-white px-3 py-1.5 rounded-lg text-sm font-bold shadow hover:bg-gray-700 transition-colors flex items-center gap-2"
+                                            title="שמור את השבוע הנוכחי כתבנית קבועה לכל שבוע"
+                                        >
+                                            <span>🔒</span> נעל כברירת מחדל
+                                        </button>
+                                    </div>
+                                    
+                                    <div className="mb-4 bg-blue-50 text-blue-800 text-sm p-3 rounded-lg border border-blue-100 flex items-center gap-2 font-medium">
+                                        <span>💡</span> טיפ: לחיצה קצרה בוחרת מיקום, <b>לחיצה ארוכה</b> פותחת אפשרויות חריגות (מחלה/חופשה).
+                                    </div>
+
+                                    <div className="flex flex-wrap gap-3 text-sm font-medium mb-5">
+                                        {Object.entries(LOCATIONS).map(([locName, data]) => {
+                                            const used = getUsageCount(editingUser, locName);
+                                            const isFull = used >= data.limit;
+                                            return (
+                                                <span key={locName} className={`px-2 py-1 rounded border ${isFull ? 'bg-red-50 text-red-700 border-red-200' : 'bg-white text-gray-700 border-gray-200'}`}>
+                                                    {data.icon} {locName}: {used}/{data.limit}
+                                                </span>
+                                            );
+                                        })}
                                     </div>
 
                                     <div className="space-y-4">
                                         {DAYS.map(day => (
                                             <div key={day} className="flex flex-col sm:flex-row sm:items-center gap-3 bg-white p-3 rounded-lg border border-gray-100 shadow-sm hover:shadow-md transition-shadow">
                                                 <div className="w-20 font-bold text-gray-700">יום {day}:</div>
-                                                <div className="flex flex-wrap gap-2 flex-1">
+                                                <div className="flex flex-wrap gap-2 flex-1 relative">
+                                                    
+                                                    {/* כפתורי בחירה רגילים - עם תמיכה בלחיצה ארוכה */}
                                                     {Object.keys(LOCATIONS).map(loc => {
                                                         const isSelected = schedule[editingUser][day] === loc;
                                                         return (
                                                             <button
                                                                 key={loc}
-                                                                onClick={() => handleLocationSelect(editingUser, day, loc)}
+                                                                onPointerDown={() => handlePointerDown(editingUser, day)}
+                                                                onPointerUp={() => handlePointerUp(editingUser, day, loc)}
+                                                                onPointerLeave={handlePointerLeave}
+                                                                onContextMenu={e => e.preventDefault()} // מניעת פתיחת תפריט ברירת מחדל בנייד
                                                                 className={`flex-1 min-w-[80px] px-3 py-2 rounded-lg font-bold text-sm border-2 transition-all ${getLocationStyle(loc, isSelected)}`}
                                                             >
                                                                 {LOCATIONS[loc].icon} {loc}
                                                             </button>
                                                         )
                                                     })}
+
+                                                    {/* מציג את החריג אם נבחר, למרות שאין לו כפתור ברשימה הרגילה */}
+                                                    {Object.keys(EXCEPTIONS).includes(schedule[editingUser][day]) && (
+                                                        <button
+                                                            onPointerDown={() => handlePointerDown(editingUser, day)}
+                                                            onPointerUp={() => handlePointerUp(editingUser, day, schedule[editingUser][day])}
+                                                            onPointerLeave={handlePointerLeave}
+                                                            onContextMenu={e => e.preventDefault()}
+                                                            className={`flex-1 min-w-[80px] px-3 py-2 rounded-lg font-bold text-sm border-2 transition-all ${getLocationStyle(schedule[editingUser][day], true)}`}
+                                                        >
+                                                            {getIconInfo(schedule[editingUser][day])} {schedule[editingUser][day]}
+                                                        </button>
+                                                    )}
                                                 </div>
                                             </div>
                                         ))}
@@ -249,25 +418,32 @@
                         </div>
                     </div>
 
+                    {/* טבלה ראשית */}
                     <div className="glass-card p-6 border border-gray-100 shadow-md">
-                        <h2 className="text-2xl font-bold text-gray-800 mb-6 text-center border-b pb-4">תמונת מצב מחלקתית שבועית</h2>
+                        <h2 className="text-2xl font-bold text-gray-800 mb-6 text-center border-b pb-4">תמונת מצב שבועית - תחום ייצור מבוזר</h2>
                         
                         <div className="overflow-x-auto rounded-xl border border-gray-200 shadow-sm">
-                            <table className="w-full text-center min-w-[700px]">
+                            <table className="w-full text-center min-w-[750px]">
                                 <thead className="bg-gray-100 text-gray-700 text-sm font-black border-b border-gray-200">
                                     <tr>
-                                        <th className="p-4 bg-gray-200/80 sticky right-0 z-10 w-32 border-l border-gray-300">שם עובד</th>
+                                        <th className="p-4 bg-gray-200/80 sticky right-0 z-10 w-36 border-l border-gray-300">שם עובד</th>
                                         {DAYS.map(day => <th key={day} className="p-4">{day}</th>)}
                                     </tr>
                                 </thead>
                                 <tbody>
                                     {EMPLOYEES.map((emp, index) => (
                                         <tr key={emp} className={`border-b border-gray-100 transition-colors hover:bg-blue-50/50 ${index % 2 === 0 ? 'bg-white' : 'bg-gray-50/30'}`}>
-                                            <td className="p-3 font-bold text-gray-800 sticky right-0 bg-inherit border-l border-gray-200 shadow-[2px_0_4px_rgba(0,0,0,0.02)] w-32">
-                                                <div className="text-lg">{emp}</div>
+                                            <td className="p-3 font-bold text-gray-800 sticky right-0 bg-inherit border-l border-gray-200 shadow-[2px_0_4px_rgba(0,0,0,0.02)] w-36 text-right pr-4">
+                                                <div className="text-lg flex justify-between items-center">
+                                                    <span>{emp}</span>
+                                                    {/* חיווי ויזואלי אם למשתמש יש ברירת מחדל שמורה */}
+                                                    {defaultSchedule[emp] && Object.values(defaultSchedule[emp]).some(val => val !== '') && (
+                                                        <span title="מצב ברירת מחדל מוגדר" className="text-xs bg-gray-200 p-1 rounded">🔒</span>
+                                                    )}
+                                                </div>
                                                 {lastUpdated[emp] && (
-                                                    <div className="text-[11px] text-gray-500 font-normal mt-1 leading-tight bg-gray-100/50 inline-block px-1 rounded">
-                                                        עודכן: {lastUpdated[emp]}
+                                                    <div className={`text-[10px] font-normal mt-1 leading-tight inline-block px-1.5 py-0.5 rounded ${lastUpdated[emp].includes('איפוס') ? 'bg-blue-100 text-blue-800' : 'bg-gray-100 text-gray-500'}`}>
+                                                        {lastUpdated[emp]}
                                                     </div>
                                                 )}
                                             </td>
@@ -277,7 +453,7 @@
                                                     <td key={day} className="p-2 w-24">
                                                         {loc ? (
                                                             <div className={`px-2 py-2 rounded-lg font-bold text-xs border ${getLocationStyle(loc, false)} shadow-sm`}>
-                                                                <span className="block mb-1 text-lg">{LOCATIONS[loc].icon}</span>
+                                                                <span className="block mb-1 text-lg">{getIconInfo(loc)}</span>
                                                                 {loc}
                                                             </div>
                                                         ) : (
